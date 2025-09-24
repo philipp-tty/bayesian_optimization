@@ -158,6 +158,30 @@ def styblinski_tang_2d(X: Tensor) -> Tensor:
     return _return_column(val)
 
 
+def booth_2d(X: Tensor) -> Tensor:
+    """
+    Booth function (2D), bounds: [-10, 10]^2, min at (1, 3) with f*=0.
+    """
+    X = _ensure_last_dim2(X)
+    x = X[..., 0]
+    y = X[..., 1]
+    val = (x + 2.0 * y - 7.0) ** 2 + (2.0 * x + y - 5.0) ** 2
+    return _return_column(val)
+
+
+def rastrigin_2d(X: Tensor) -> Tensor:
+    """
+    Rastrigin function (2D), bounds: [-5.12, 5.12]^2, min at (0,0) with f*=0.
+    """
+    X = _ensure_last_dim2(X)
+    x = X[..., 0]
+    y = X[..., 1]
+    A = _as_like(x, 10.0)
+    two_pi = _as_like(x, 2.0 * torch.pi)
+    val = A * 2.0 + (x**2 - A * torch.cos(two_pi * x)) + (y**2 - A * torch.cos(two_pi * y))
+    return _return_column(val)
+
+
 # ------------- registry and metadata ------------- #
 
 def _t2(v: List[List[float]]) -> Tensor:
@@ -222,6 +246,20 @@ BENCHMARKS: Dict[str, Benchmark2D] = {
         bounds=_t2([[-5.0, -5.0], [5.0, 5.0]]),
         global_minima=_t2([[-2.903534, -2.903534]]),
         optimum_value=-78.332,
+    ),
+    "booth": Benchmark2D(
+        name="booth",
+        fn=booth_2d,
+        bounds=_t2([[-10.0, -10.0], [10.0, 10.0]]),
+        global_minima=_t2([[1.0, 3.0]]),
+        optimum_value=0.0,
+    ),
+    "rastrigin": Benchmark2D(
+        name="rastrigin",
+        fn=rastrigin_2d,
+        bounds=_t2([[-5.12, -5.12], [5.12, 5.12]]),
+        global_minima=_t2([[0.0, 0.0]]),
+        optimum_value=0.0,
     ),
 }
 
@@ -291,6 +329,8 @@ __all__ = [
     "himmelblau",
     "goldstein_price",
     "styblinski_tang_2d",
+    "booth_2d",
+    "rastrigin_2d",
     # helpers
     "normalize",
     "unnormalize",

@@ -7,11 +7,13 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
+import math
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import matplotlib.colors as mcolors
 
 from algorithms.bayesian_optimization import BayesianOptimization
 
@@ -150,6 +152,11 @@ def parse_arguments(bench_mod) -> argparse.Namespace:
         action="store_true",
         help="Show live optimization plot"
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run all benchmarks (ignores --benchmark) and, if --plot is set, show them together in one large plot"
+    )
 
     return parser.parse_args()
 
@@ -182,6 +189,97 @@ def normalize_points(X: torch.Tensor, raw_bounds: torch.Tensor) -> torch.Tensor:
     lb = raw_bounds[0].to(dtype=X.dtype, device=X.device)
     ub = raw_bounds[1].to(dtype=X.dtype, device=X.device)
     return (X - lb) / (ub - lb + 1e-12)
+
+
+# Add a reusable red->green colormap
+RED_GREEN_CMAP = mcolors.LinearSegmentedColormap.from_list("red_green", ["#ff0000", "#06d6a0"])
+
+
+# New: static grid plot of multiple benchmarks in one figure
+def plot_benchmarks_grid(results, normalized: bool, bench_mod) -> None:
+    """
+    Plot all benchmark surfaces with sampled points and best locations in one large figure.
+    `results` is a list of dicts with keys: name, bench, X, Y.
+    """
+    if not ensure_interactive_backend():
+        print("Warning: No interactive matplotlib backend available. Skipping plot.")
+        return
+
+    setup_plot_style()
+
+    n = len(results)
+    ncols = int(math.ceil(math.sqrt(n)))
+    nrows = int(math.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows), constrained_layout=True)
+    axes = np.array(axes).reshape(-1)
+
+    for idx, res in enumerate(results):
+        ax = axes[idx]
+        bench = res["bench"]
+        X_hist = res["X"].detach().to(dtype=torch.double).cpu()
+        Y_hist = res["Y"].detach().to(dtype=torch.double).cpu().view(-1)
+
+        # Bounds in plot space
+        if normalized:
+            bounds_plot = torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.double)
+        else:
+            bounds_plot = bench.bounds.to(dtype=torch.double)
+
+        # Contour grid
+        Xg, Yg, XY = build_grid(bounds_plot, resolution=220)
+        with torch.no_grad():
+            if normalized:
+                XY_raw = bench_mod.unnormalize(XY, bench.bounds.to(dtype=torch.double))
+            else:
+                XY_raw = XY
+            Z = bench.fn(XY_raw)
+            Z = Z.view(Xg.shape[0], Xg.shape[1]).cpu().numpy()
+
+        cont = ax.contourf(Xg.numpy(), Yg.numpy(), Z, levels=30, cmap="cividis", alpha=0.95)
+        # Add a colorbar to each subplot
+        cbar = fig.colorbar(cont, ax=ax, pad=0.01, shrink=0.9)
+        cbar.set_label("f(x)", fontsize=9)
+
+        # Known global minima
+        mins_raw = bench.global_minima.to(dtype=torch.double)
+        mins_plot = normalize_points(mins_raw, bench.bounds.to(dtype=torch.double)) if normalized else mins_raw
+        ax.scatter(
+            mins_plot[:, 0].cpu(), mins_plot[:, 1].cpu(),
+            marker="X", s=70, c="#06d6a0",
+            edgecolors="#1b1e23", linewidths=0.6, zorder=5
+        )
+
+        # Sampled points and path
+        if X_hist.numel() > 0:
+            xs = X_hist[:, 0].numpy()
+            ys = X_hist[:, 1].numpy()
+            colors = np.linspace(0, 1, len(xs))
+            sc = ax.scatter(xs, ys, c=colors, cmap=RED_GREEN_CMAP, vmin=0.0, vmax=1.0, s=26,
+                            edgecolors="#ffffff", linewidths=0.5, zorder=4)
+            ax.plot(xs, ys, color="#ffffff", lw=1.0, alpha=0.55, zorder=3)
+
+            best_idx = int(torch.argmin(Y_hist))
+            ax.scatter([xs[best_idx]], [ys[best_idx]], marker="*", s=120, c="#FFD166",
+                       edgecolors="#1b1e23", linewidths=0.6, zorder=6)
+
+            regret = float(Y_hist[best_idx].item()) - float(bench.optimum_value)
+            ax.set_title(f"{bench.name} • best={float(Y_hist[best_idx]):.4g} • regret={regret:.3g}")
+        else:
+            ax.set_title(f"{bench.name}")
+
+        lb = bounds_plot[0].cpu().numpy()
+        ub = bounds_plot[1].cpu().numpy()
+        ax.set_xlim(lb[0], ub[0])
+        ax.set_ylim(lb[1], ub[1])
+        ax.set_xlabel("x1 (normalized)" if normalized else "x1")
+        ax.set_ylabel("x2 (normalized)" if normalized else "x2")
+
+    # Hide any unused axes
+    for j in range(idx + 1, len(axes)):
+        axes[j].axis("off")
+
+    fig.suptitle("Bayesian Optimization across Benchmarks", fontsize=12)
+    plt.show()
 
 
 class LivePlotter:
@@ -226,7 +324,7 @@ class LivePlotter:
         # Plot contours
         contour = self.ax.contourf(
             X_grid.numpy(), Y_grid.numpy(), Z,
-            levels=30, cmap="magma", alpha=0.95
+            levels=30, cmap="cividis", alpha=0.95
         )
         cbar = self.fig.colorbar(contour, ax=self.ax, pad=0.01)
         cbar.set_label("f(x)", fontsize=10)
@@ -244,7 +342,7 @@ class LivePlotter:
 
         # Initialize dynamic artists
         self.artists['points'] = self.ax.scatter(
-            [], [], c=[], cmap="viridis",
+            [], [], c=[], cmap=RED_GREEN_CMAP,
             vmin=0.0, vmax=1.0, s=36,
             edgecolors="#ffffff", linewidths=0.6, zorder=4
         )
@@ -264,8 +362,8 @@ class LivePlotter:
 
         self.ax.set_xlim(lb[0], ub[0])
         self.ax.set_ylim(lb[1], ub[1])
-        self.ax.set_xlabel("x₁ (normalized)" if self.normalized else "x₁")
-        self.ax.set_ylabel("x₂ (normalized)" if self.normalized else "x₂")
+        self.ax.set_xlabel("x1 (normalized)" if self.normalized else "x1")
+        self.ax.set_ylabel("x2 (normalized)" if self.normalized else "x2")
         self.ax.set_title("Bayesian Optimization")
         self.ax.legend(loc="upper right", fontsize=9)
 
@@ -332,6 +430,92 @@ def main():
     # Parse arguments
     args = parse_arguments(bench_mod)
 
+    # Run all benchmarks mode
+    if args.all:
+        set_random_seeds(args.seed)
+        results = []
+        names = bench_mod.available_benchmarks()
+        print(f"\n{'=' * 60}")
+        print(f"Running ALL benchmarks: {', '.join(names)}")
+        print(f"Iterations: {args.iters} (+ {args.n_init} initial)")
+        print(f"Normalized space: {args.normalized} | Noise std: {args.noise_std}")
+        print(f"{'=' * 60}\n")
+
+        for name in names:
+            # Build objective and bounds
+            objective, bounds, bench = bench_mod.make_objective(
+                name=name,
+                normalized=args.normalized,
+                noise_std=float(args.noise_std)
+            )
+
+            # Initial Sobol samples
+            d = 2
+            sobol = torch.quasirandom.SobolEngine(d, scramble=True, seed=args.seed)
+            X_unit = sobol.draw(args.n_init).to(dtype=torch.double)
+            if args.normalized:
+                X0 = X_unit
+            else:
+                X0 = bench_mod.unnormalize(X_unit, bench.bounds.to(dtype=torch.double))
+            Y0 = objective(X0)
+
+            # BO
+            bo = BayesianOptimization(
+                x_train=X0,
+                y_train=Y0,
+                bounds=bounds,
+                maximize=False,
+                use_outcome_transform=True
+            )
+
+            # Optimize
+            for i in range(1, args.iters + 1):
+                x_new = bo.get_next_data_points(q=1)
+                y_new = objective(x_new)
+                bo.update_model(x_new, y_new, use_outcome_transform=True)
+
+                y_vals = bo.y_train.detach().cpu().view(-1)
+                best_idx = int(torch.argmin(y_vals))
+                x_best = bo.x_train[best_idx]
+                y_best = float(y_vals[best_idx].item())
+
+                if args.normalized:
+                    x_best_raw = bench_mod.unnormalize(x_best, bench.bounds)
+                else:
+                    x_best_raw = x_best
+
+                print(f"[{name:>16s} {i:03d}/{args.iters}] y_new={float(y_new.item()):+.6g} | "
+                      f"best={y_best:.6g} at x*=[{x_best_raw[0]:.4f}, {x_best_raw[1]:.4f}]")
+
+            # Collect results
+            results.append({
+                "name": bench.name,
+                "bench": bench,
+                "X": bo.x_train,
+                "Y": bo.y_train,
+            })
+
+            # Per-benchmark summary
+            y_all = bo.y_train.detach().cpu().view(-1)
+            final_idx = int(torch.argmin(y_all))
+            x_final = bo.x_train[final_idx]
+            y_final = float(y_all[final_idx].item())
+            x_final_raw = bench_mod.unnormalize(x_final, bench.bounds) if args.normalized else x_final
+            dist_to_min = torch.cdist(
+                x_final_raw.view(1, -1),
+                bench.global_minima.to(dtype=torch.double)
+            ).min().item()
+            regret = y_final - float(bench.optimum_value)
+            print(f"Summary [{name}]: best={y_final:.6g}, x*=[{x_final_raw[0]:.6f}, {x_final_raw[1]:.6f}], "
+                  f"f*={bench.optimum_value:.6g}, regret={regret:.6g}, dist-to-min={dist_to_min:.6g}\n")
+
+        # Combined plot
+        if args.plot:
+            plot_benchmarks_grid(results, args.normalized, bench_mod)
+        return
+
+    # Single-benchmark mode (original behavior)
+    # Parse arguments already done above
     # Set random seeds
     set_random_seeds(args.seed)
 
