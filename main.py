@@ -153,6 +153,13 @@ def parse_arguments(bench_mod) -> argparse.Namespace:
             "Run all benchmarks (ignores --benchmark). If --plot is set, show them together in one grid figure."
         ),
     )
+    parser.add_argument(
+        "--save-plot",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Save final plot (grid or live figure) to this file. Creates parent dirs.",
+    )
 
     return parser.parse_args()
 
@@ -202,7 +209,7 @@ RED_GREEN_CMAP = mcolors.LinearSegmentedColormap.from_list("red_green", ["#ff000
 # Static grid plot for multiple benchmarks
 # ---------------------------------------------------------------------------
 
-def plot_benchmarks_grid(results, normalized: bool, bench_mod) -> None:
+def plot_benchmarks_grid(results, normalized: bool, bench_mod, save_path: Optional[str] = None, show: bool = True) -> None:
     """Plot benchmark surfaces with sampled points and best locations in one figure.
 
     Parameters
@@ -213,8 +220,12 @@ def plot_benchmarks_grid(results, normalized: bool, bench_mod) -> None:
         Whether the coordinates in ``X`` are already normalized.
     bench_mod
         Benchmark module with ``unnormalize`` helper.
+    save_path
+        Optional path to save the figure (PNG/PDF etc.).
+    show
+        Whether to display the plot interactively.
     """
-    if not ensure_interactive_backend():
+    if not ensure_interactive_backend() and not save_path:
         print("Warning: No interactive matplotlib backend available. Skipping plot.")
         return
 
@@ -302,7 +313,19 @@ def plot_benchmarks_grid(results, normalized: bool, bench_mod) -> None:
         axes[j].axis("off")
 
     fig.suptitle("Bayesian Optimization across Benchmarks", fontsize=12)
-    plt.show()
+    if save_path:
+        try:
+            out_path = Path(save_path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(out_path, bbox_inches="tight")
+            print(f"Saved benchmark grid figure to: {out_path}")
+        except Exception as e:
+            print(f"Failed to save figure to {save_path}: {e}")
+
+    if show and ensure_interactive_backend():
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +343,7 @@ class LivePlotter:
         normalized: bool,
         raw_bounds: torch.Tensor,
         posterior_fn: Optional[Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]] = None,
+        save_path: Optional[str] = None,
     ) -> None:
         self.objective = objective
         self.bench = bench
@@ -341,6 +365,7 @@ class LivePlotter:
         self.obj_levels = None
         self.posterior_fn = posterior_fn
         self.surr_enabled = False
+        self.save_path = save_path
 
         if not ensure_interactive_backend():
             self.enabled = False
@@ -550,8 +575,25 @@ class LivePlotter:
         self.fig.canvas.flush_events()
         plt.pause(0.01)
 
+    def save(self, path: Optional[str] = None) -> None:
+        """Save current figure to disk."""
+        if self.fig is None:
+            return
+        target = path or self.save_path
+        if not target:
+            return
+        try:
+            p = Path(target)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            self.fig.savefig(p, bbox_inches="tight")
+            print(f"Saved live optimization figure to: {p}")
+        except Exception as e:
+            print(f"Failed to save live plot to {target}: {e}")
+
     def close(self) -> None:
-        """Close the plot window if open."""
+        # Before closing, auto-save if requested
+        if self.save_path:
+            self.save(self.save_path)
         if self.enabled and self.fig is not None:
             plt.close(self.fig)
 
@@ -632,8 +674,14 @@ def main() -> None:
                 f"f*={bench.optimum_value:.6g}, regret={regret:.6g}, dist-to-min={dist_to_min:.6g}\n"
             )
 
-        if args.plot:
-            plot_benchmarks_grid(results, args.normalized, bench_mod)
+        if args.plot or args.save_plot:
+            plot_benchmarks_grid(
+                results,
+                args.normalized,
+                bench_mod,
+                save_path=args.save_plot,
+                show=args.plot,
+            )
         return
 
     # ------------------------------ SINGLE BENCH ------------------------------
@@ -715,6 +763,7 @@ def main() -> None:
             args.normalized,
             raw_bounds=bench.bounds.to(dtype=torch.double),
             posterior_fn=make_posterior_fn(bo),
+            save_path=args.save_plot,
         )
 
     print(f"\n{'=' * 60}")
@@ -765,6 +814,9 @@ def main() -> None:
     print(f"{'=' * 60}\n")
 
     if plotter is not None and plotter.enabled:
+        if args.save_plot:
+            # Ensure final state is saved before user closes window
+            plotter.save(args.save_plot)
         try:
             print("Plot window is open. Press Enter to close and exit...")
             input()
